@@ -1,0 +1,389 @@
+/* global L */
+(function($, global) {
+    'use strict';
+
+    var mappyLoadPromise;
+
+    var defaultMapOptions = {
+        scrollWheelZoom: false,
+        dragging: true,
+        zoomControl: true,
+        doubleClickZoom: false
+    };
+
+    /**
+     * Factory method for leaflet based map providers
+     */
+    function component() {
+        return {
+            init: function() {
+                return loadMappyScript();
+            },
+            cleanup: function(map) {
+                map.remove();
+            },
+            /**
+             * args -
+             * conatiner : regular domnode element
+             * zoom - zoom
+             */
+            drawMap: function(args) {
+                return internalDrawMap(args);
+            },
+            refreshSize: function(map) {
+                map.invalidateSize();
+                map.setOverlay();
+            },
+            refreshZoom: function(map, zoom) {
+                map.setOverlay();
+                map.setZoom(zoom);
+            },
+            refreshStyle: function(map /*, style*/) {
+                map.setOverlay();
+            },
+            setCenter: function(map, loc, zoom) {
+                if (!loc.lat || !loc.lng) {
+                    return;
+                }
+
+                var actualZoom = zoom || map.zoom || 13;
+                map.setView(new L.latLng(loc.lat, loc.lng), actualZoom);
+            },
+            setBounds: function(map, bounds) {
+                if (!bounds) {
+                    return;
+                }
+
+                var boundsArray = [bounds.northeast, bounds.southwest].map(function(bound) {
+                    return new L.latLng(bound.lat, bound.lng);
+                });
+
+                var mapboxBounds = new L.LatLngBounds();
+                boundsArray.map(mapboxBounds.extend.bind(mapboxBounds));
+
+                map.fitBounds(mapboxBounds);
+            },
+            createMarker: function(map, options) {
+                // if no location set dummy marker loc else it will make problem later on
+                var loc = L.latLng(options.lat, options.lng) || [50.5, 30.5];
+                var markerOptions = options.markerOptions || {};
+
+                return L.marker(loc, markerOptions).addTo(map);
+            },
+            updateMarker: function(marker, loc) {
+                if (!loc.lat || !loc.lng) {
+                    return;
+                }
+
+                marker.setLatLng(new L.LatLng(loc.lat, loc.lng));
+            },
+            openPopup: function(map) {
+                if (map.dmPopup) {
+                    map.removeLayer(map.dmPopup);
+                }
+
+                if (map.dmPopupMaker) {
+                    map.dmPopup = map.dmPopupMaker();
+                    map.dmPopup.addTo(map);
+                }
+            },
+            refreshPopup: function(map) {
+                this.openPopup(map);
+            },
+            closePopup: function(map) {
+                if (map.dmPopup) {
+                    map.removeLayer(map.dmPopup);
+                }
+            }
+        };
+    }
+
+    function internalDrawMap(args) {
+        var device = $.layoutDevice ? $.layoutDevice.type : 'mobile';
+        var container = $(args.container).find('.mapContainer')[0] || $(args.container)[0];
+        var radiusProps = pullRadiusData(args.container);
+        var mapCenter = L.latLng(args.lat, args.lng);
+        var options = args.options || {};
+        var markers = args.markers || [
+            {
+                lat: args.lat,
+                lng: args.lng,
+                popup: args.popupOptions
+            }
+        ];
+        var zoom = args.zoom || 13;
+        var kml = args.kml || null;
+
+        var mapOptions = $.extend({}, defaultMapOptions, {
+            clientId: 'Solocal',
+            scrollWheelZoom: options.scrollWheelZoom,
+            dragging: options.dragging || options.dragging,
+            zoomControl: options.zoomControl,
+            draggable: !device || device !== 'mobile',
+            doubleClickZoom: options.doubleClickZoom
+        });
+
+        $(container).empty();
+
+        var map = new L.Mappy.Map(container, mapOptions);
+
+        map.setZoom(zoom);
+
+        if (mapCenter) {
+            map.setView(mapCenter);
+        }
+
+        markers = markers
+            .map(function(marker) {
+                marker.location = L.latLng(marker.lat, marker.lng);
+                return marker;
+            })
+            .filter(function(marker) {
+                return marker.location;
+            });
+
+        var bounds = new L.LatLngBounds();
+
+        markers.forEach(function(markerData) {
+            addMarkerToMap({
+                data: markerData,
+                map: map,
+                container: args.container
+            });
+
+            bounds.extend(markerData.location);
+        });
+
+        if (options.fitBounds) {
+            if (markers.length > 1) {
+                map.fitBounds(bounds);
+            } else if (markers.length === 1) {
+                map.setView(markers[0].location);
+            }
+        }
+
+        var kmlCustomLayer =
+            radiusProps && radiusProps.toggle
+                ? L.geoJson(null, {
+                      style: function() {
+                          return {
+                              color: radiusProps.strokeColor,
+                              fillColor: radiusProps.bgColor,
+                              fillOpacity: 1
+                          };
+                      }
+                  })
+                : null;
+
+        if (kml && rtCommonProps['feature.flag.mappy.kml'] === true) {
+            kml.forEach(function(k) {
+                if (!k) {
+                    return;
+                }
+                var url = buildKmlUrl(k);
+                var kmlLayer = omnivore
+                    .kml(url, null, kmlCustomLayer)
+                    .on('ready', function() {
+                        bounds.extend(kmlLayer.getBounds());
+                        map.fitBounds(bounds);
+                        map.setZoom(zoom);
+                    })
+                    .addTo(map);
+            });
+        }
+
+        return map;
+    }
+
+    function buildKmlUrl(kmlName) {
+        return 'https://de.cdn-website.com/migration/' + kmlName + '.xml';
+    }
+
+    function addMarkerToMap(opts) {
+        var map = opts.map;
+        var data = opts.data || {};
+        var markerOptions = {
+            clickable: data.clickable,
+            title: data.title || ''
+        };
+        var marker = L.marker(data.location, markerOptions).addTo(map);
+        $(marker._icon).addClass('map-marker');
+
+        if (data.listener) {
+            marker.on('click', data.listener);
+        }
+
+        var options = {
+            marker: marker,
+            data: data,
+            container: opts.container,
+            map: map
+        };
+        buildAndAddPopup(options);
+
+        buildAndAddRadius(options);
+
+        return marker;
+    }
+
+    function buildAndAddPopup(opts) {
+        var map = opts.map;
+        var data = opts.data || {};
+        var marker = opts.marker;
+        var popupOptions = data.popup || {};
+        if (popupOptions.show) {
+            var popupDisplay = popupOptions.display || 'click';
+            map.dmPopup = null;
+
+            if (popupDisplay === 'always') {
+                map.dmPopup = addPopup(data, popupDisplay, map);
+
+                map.on('popupclose', function() {
+                    map.dmPopup = null;
+                });
+
+                // create new popup instance each time so it's position will be recalculated
+                marker.on('click', function() {
+                    if (map.dmPopup) {
+                        map.removeLayer(map.dmPopup);
+                    } else {
+                        map.dmPopup = addPopup(data, popupDisplay, map);
+                    }
+                });
+            } else if (popupDisplay === 'click') {
+                map.on('popupclose', function() {
+                    map.dmPopup = null;
+                });
+
+                // create new popup instance each time so it's position will be recalculated
+                marker.on('click', function() {
+                    if (map.dmPopup) {
+                        map.removeLayer(map.dmPopup);
+                    } else {
+                        map.dmPopup = addPopup(data, popupDisplay, map);
+                    }
+                });
+            } else {
+                // hover default
+                marker.on('mouseover', function() {
+                    map.dmPopup = addPopup(data, popupDisplay, map);
+                });
+
+                marker.on('mouseout', function() {
+                    map.removeLayer(map.dmPopup);
+                });
+            }
+
+            map.dmPopupMaker = popupMaker.bind(null, data, popupDisplay);
+        }
+    }
+
+    function addPopup(marker, popupDisplay, map) {
+        return popupMaker(marker, popupDisplay).addTo(map);
+    }
+
+    function popupMaker(marker, popupDisplay) {
+        var popup = new L.Popup({
+            autoPan: false,
+            offset: [0, -20],
+            closeButton: popupDisplay !== 'hover',
+            closeOnClick: popupDisplay !== 'always',
+            className: 'map-popup-wrapper map-popup-display-' + popupDisplay
+        }).setContent(marker.popup.html);
+
+        popup.setLatLng(marker.location);
+        return popup;
+    }
+
+    function buildAndAddRadius(opts) {
+        var map = opts.map;
+        // var marker = opts.marker;
+        var container = opts.container;
+        var location = opts.data.location;
+        var radiusProps = pullRadiusData(container);
+
+        if (!radiusProps.toggle) {
+            return;
+        }
+
+        L.circle(location, radiusProps.radius, {
+            color: radiusProps.strokeColor,
+            fillColor: radiusProps.bgColor,
+            fillOpacity: 1,
+            weight: radiusProps.strokeSize
+        }).addTo(map);
+    }
+
+    function pullRadiusData(mapContainer) {
+        setDefaults(mapContainer);
+        return {
+            toggle: mapContainer.dataset.radiusToggle && mapContainer.dataset.radiusToggle !== 'false',
+            radius: parseInt(mapContainer.dataset.radius, 10) || 0,
+            bgColor: mapContainer.dataset.radiusBgColor,
+            strokeColor: mapContainer.dataset.radiusStrokeColor,
+            strokeSize: parseInt(mapContainer.dataset.radiusStrokeSize, 10)
+        };
+    }
+
+    function loadMappyScript() {
+        if (!mappyLoadPromise) {
+            var CDNhost;
+            if (window.rtCommonProps) {
+                CDNhost = rtCommonProps['common.resources.cdn.host'];
+            } else {
+                CDNhost = commonProps['common.resources.cdn.host'];
+            }
+
+            mappyLoadPromise = new Promise(function(resolve) {
+                $.loadScript(CDNhost + '/editor/ed/vendor/leaflet/leaflet.min.js')
+                    .then(function() {
+                        L.Icon.Default.imagePath = CDNhost + '/editor/ed/vendor/leaflet/images/';
+                        return $.loadScript(
+                            CDNhost + '/_dm/s/rt/scripts/vendor/leafletOmnivore/leaflet-omnivore-script.min.js'
+                        );
+                    })
+                    .then(function() {
+                        return $.loadScript(CDNhost + '/editor/ed/vendor/mappy/L.Mappy.js');
+                    })
+                    .then(function() {
+                        L.Mappy.enableHttps();
+                        L.Mappy.setClientId('Solocal');
+                        resolve();
+                    });
+                $.loadCss([
+                    {
+                        id: 'leaflet-css',
+                        path: CDNhost + '/editor/ed/vendor/leaflet/leaflet.css'
+                    }
+                ]);
+                $.loadCss([
+                    {
+                        id: 'mappy-css',
+                        path: CDNhost + '/editor/ed/vendor/mappy/L.Mappy.css'
+                    }
+                ]);
+            });
+        }
+
+        return mappyLoadPromise;
+    }
+
+    function setDefaults(element) {
+        var commonProps = global.commonProps || global.rtCommonProps;
+        if (!element.dataset.radius) {
+            element.dataset.radius = commonProps['common.map.defaults.radiusSize'];
+        }
+        if (!element.dataset.radiusBgColor) {
+            element.dataset.radiusBgColor = commonProps['common.map.defaults.radiusBg'];
+        }
+        if (!element.dataset.radiusStrokeColor) {
+            element.dataset.radiusStrokeColor = commonProps['common.map.defaults.strokeColor'];
+        }
+        if (!element.dataset.radiusStrokeSize) {
+            element.dataset.radiusStrokeSize = commonProps['common.map.defaults.strokeSize'];
+        }
+    }
+
+    $.geoProviders = $.geoProviders || {};
+    $.geoProviders.mappy = component();
+})(jQuery, window);
