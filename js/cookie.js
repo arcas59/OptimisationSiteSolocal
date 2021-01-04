@@ -1,0 +1,1 @@
+window.cookiesNotificationMarkupPreview = ' <div>Nous utilisons des cookies pour optimiser votre exp&eacute;rience sur notre site web. Pour en savoir plus, veuillez acc&eacute;der &agrave; la page Confidentialit&eacute;.<\/div> \n';
